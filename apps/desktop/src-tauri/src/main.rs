@@ -280,6 +280,9 @@
 // Suppress cfg warnings that originate inside the `objc` crate's macros
 #![allow(unexpected_cfgs)]
 
+mod gemini_llm;
+mod screenshot;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::Manager;
@@ -385,6 +388,8 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        // All user interaction is hotkey-driven from Rust; React is purely
+        // event-driven.  No commands are called from the frontend.
         .invoke_handler(tauri::generate_handler![greet, get_app_status])
         .setup(move |app| {
             let window = app
@@ -466,6 +471,7 @@ fn main() {
             //   The overlay is NEVER interactive via mouse in either state.
             //   set_ignore_cursor_events(true) is always set after show().
             {
+                use tauri::Emitter;
                 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
                 let toggle_window = window.clone();
@@ -480,8 +486,15 @@ fn main() {
 
                             if was_visible {
                                 // VISIBLE → HIDDEN
+                                // Always restore click-through before hiding so there is
+                                // never a frame where the hidden window could steal input.
                                 let _ = toggle_window.set_ignore_cursor_events(true);
                                 let _ = toggle_window.hide();
+                                // Notify React so its mode state stays in sync.
+                                let _ = toggle_window.emit(
+                                    "overlay-toggle",
+                                    serde_json::json!({ "visible": false }),
+                                );
                             } else {
                                 // HIDDEN → VISIBLE
                                 // show() first so the window exists on-screen, then
@@ -498,10 +511,105 @@ fn main() {
                                         ptr as *mut objc::runtime::Object,
                                     );
                                 }
+
+                                // Notify React so its mode state stays in sync.
+                                let _ = toggle_window.emit(
+                                    "overlay-toggle",
+                                    serde_json::json!({ "visible": true }),
+                                );
                             }
                         }
                     })
                     .expect("failed to register global shortcut Cmd+Shift+Space");
+            }
+
+            // ── Global hotkey: Cmd+Shift+S — full pipeline ───────────────
+            //
+            // Flow (fully async, no UI interaction required):
+            //   1. Show overlay if hidden (so the user can see progress).
+            //   2. Emit "capture-start"  → React: status = scanning
+            //   3. [blocking] Screenshot + Apple Vision OCR
+            //   4. Emit "llm-start"      → React: status = thinking, clear answer
+            //   5. Stream OpenAI response as "llm-token" events → React: appends tokens
+            //   6. Emit "llm-done"       → React: status = done
+            //      OR "pipeline-error"  → React: status = error
+            //
+            // contentProtected = true means our window is excluded from the
+            // ScreenCaptureKit frame — the screenshot captures only the user's
+            // content behind the overlay.
+            {
+                use tauri::Emitter;
+                use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+
+                let pipeline_window  = window.clone();
+                let pipeline_visible = overlay_visible.clone();
+
+                app.handle()
+                    .global_shortcut()
+                    .on_shortcut("CmdOrCtrl+Shift+S", move |_app, _shortcut, event| {
+                        if event.state() != ShortcutState::Pressed {
+                            return;
+                        }
+
+                        // Always show the overlay so the user can see progress.
+                        if !pipeline_visible.load(Ordering::SeqCst) {
+                            let _ = pipeline_window.show();
+                            let _ = pipeline_window.set_ignore_cursor_events(true);
+                            pipeline_visible.store(true, Ordering::SeqCst);
+
+                            #[cfg(target_os = "macos")]
+                            if let Ok(ptr) = pipeline_window.ns_window() {
+                                apply_overlay_window_settings(
+                                    ptr as *mut objc::runtime::Object,
+                                );
+                            }
+                        }
+
+                        // Notify React: pipeline starting.
+                        let _ = pipeline_window.emit("capture-start", ());
+
+                        // Spawn the full async pipeline on Tauri's runtime.
+                        let win = pipeline_window.clone();
+                        tauri::async_runtime::spawn(async move {
+                            // ── Step 1: Screenshot + OCR (blocking) ──────────
+                            let ocr = match tokio::task::spawn_blocking(
+                                screenshot::capture_and_ocr,
+                            )
+                            .await
+                            {
+                                Ok(Ok(r))  => r,
+                                Ok(Err(e)) => {
+                                    let _ = win.emit("pipeline-error", &e);
+                                    return;
+                                }
+                                Err(e) => {
+                                    let _ = win.emit("pipeline-error", &e.to_string());
+                                    return;
+                                }
+                            };
+
+                            // ── Step 2: LLM streaming ─────────────────────────
+                            match gemini_llm::query_streaming(&ocr.ocr_text, &win).await {
+                                Ok(_)  => { let _ = win.emit("llm-done", ()); }
+                                Err(e) => { let _ = win.emit("pipeline-error", &e); }
+                            }
+                        });
+                    })
+                    .expect("failed to register global shortcut Cmd+Shift+S");
+            }
+
+            // ── Global hotkey: Cmd+Shift+Q — quit ────────────────────────
+            {
+                use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+
+                app.handle()
+                    .global_shortcut()
+                    .on_shortcut("CmdOrCtrl+Shift+Q", move |handle, _shortcut, event| {
+                        if event.state() == ShortcutState::Pressed {
+                            handle.exit(0);
+                        }
+                    })
+                    .expect("failed to register global shortcut Cmd+Shift+Q");
             }
 
             // ── Boot state: visible, permanently click-through ────────────
