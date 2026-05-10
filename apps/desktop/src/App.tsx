@@ -1,3 +1,4 @@
+import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useEffect, useRef, useState } from 'react';
 import './App.css';
@@ -9,8 +10,27 @@ import './App.css';
 type PipelineStatus = 'idle' | 'scanning' | 'thinking' | 'done' | 'error';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Sub-components (all pointer-events: none via CSS)
+// Sub-components
 // ─────────────────────────────────────────────────────────────────────────────
+
+/** Black 38px header — drag anywhere on it to move the window,
+ *  click ✕ to fully quit the app. */
+function DragHeader() {
+	return (
+		<div className="drag-header" data-tauri-drag-region>
+			<span className="drag-title" data-tauri-drag-region>
+				underscreen
+			</span>
+			<button
+				className="close-btn"
+				title="Quit"
+				onClick={() => invoke('quit_app')}
+			>
+				✕
+			</button>
+		</div>
+	);
+}
 
 function StatusLine({
 	status,
@@ -89,6 +109,8 @@ export default function App() {
 	const [answerKey, setAnswerKey] = useState(0);
 	const [errorMsg, setErrorMsg] = useState('');
 	const answerRef = useRef<HTMLPreElement>(null);
+	const panelRef = useRef<HTMLDivElement>(null);
+	const lastHRef = useRef<number>(0);
 
 	// ── Auto-scroll answer to bottom as tokens stream in ───────────────────
 	useEffect(() => {
@@ -96,6 +118,27 @@ export default function App() {
 			answerRef.current.scrollTop = answerRef.current.scrollHeight;
 		}
 	}, [answer]);
+
+	// ── Resize the OS window to match the panel height ─────────────────────
+	// ResizeObserver fires whenever the panel grows (answer streaming in)
+	// or shrinks (answer cleared). We clamp: min 150 px, max 390 px (~10 cm).
+	// Only invoke when the height actually changes to avoid IPC spam.
+	useEffect(() => {
+		const el = panelRef.current;
+		if (!el) return;
+
+		const ro = new ResizeObserver(([entry]) => {
+			const h = Math.ceil(entry.contentRect.height);
+			const clamped = Math.max(150, Math.min(h, 390));
+			if (Math.abs(clamped - lastHRef.current) > 1) {
+				lastHRef.current = clamped;
+				invoke('resize_window', { height: clamped });
+			}
+		});
+
+		ro.observe(el);
+		return () => ro.disconnect();
+	}, []);
 
 	// ── Rust → React event bus ──────────────────────────────────────────────
 	useEffect(() => {
@@ -142,33 +185,42 @@ export default function App() {
 	return (
 		// overlay-root: full-window transparent pass-through canvas
 		<div className="overlay-root">
-			<div className={`panel ${hasAnswer ? 'panel--answer' : 'panel--idle'}`}>
-				{hasAnswer ? (
-					<pre
-						key={answerKey}
-						ref={answerRef}
-						className="answer-text"
-						/* scrollTop driven programmatically via ref when answer
-               exceeds max-height — otherwise grows naturally with content */
-					>
-						{answer}
-						{isStreaming && <span className="stream-cursor">▊</span>}
-					</pre>
-				) : (
-					<div className="idle-stack">
-						{/* ── Pipeline status ──────────────────────────────────────────── */}
-						<div className="status-row">
-							<StatusLine status={status} errorMsg={errorMsg} />
-						</div>
+			<div
+				ref={panelRef}
+				className={`panel ${hasAnswer ? 'panel--answer' : 'panel--idle'}`}
+			>
+				{/* ── Draggable black header — always visible ─────────────── */}
+				<DragHeader />
 
-						{/* ── Hotkey reference strip ───────────────────────────────────── */}
-						<div className="hotkeys">
-							<HotkeyRow keys={['⌘', '⇧', 'Space']} label="Hide / Show" />
-							<HotkeyRow keys={['⌘', '⇧', 'S']} label="Capture + Answer" />
-							<HotkeyRow keys={['⌘', 'OPT', 'X']} label="Quit" />
+				{/* ── Panel body ──────────────────────────────────────────── */}
+				<div className="panel-body">
+					{hasAnswer ? (
+						<pre key={answerKey} ref={answerRef} className="answer-text">
+							{answer}
+							{isStreaming && <span className="stream-cursor">▊</span>}
+						</pre>
+					) : (
+						<div className="idle-stack">
+							{/* ── Pipeline status ───────────────────────────── */}
+							<div className="status-row">
+								<StatusLine status={status} errorMsg={errorMsg} />
+							</div>
+
+							{/* ── Hotkey reference strip ────────────────────── */}
+							<div className="hotkeys">
+								<HotkeyRow keys={['⌘', '⇧', 'Space']} label="Hide / Show" />
+								<HotkeyRow keys={['⌘', '⇧', 'S']} label="Capture + Answer" />
+								<HotkeyRow keys={['⌘', '⌥', '←']} label="Top-left" />
+								<HotkeyRow keys={['⌘', '⌥', '→']} label="Top-right" />
+								<HotkeyRow keys={['⌘', '⌥', '↑']} label="Top-middle" />
+								<HotkeyRow keys={['⌘', '⌥', '↓']} label="Bottom-middle" />
+								<HotkeyRow keys={['⌘', '⌥', '⇧', '←']} label="Bottom-left" />
+								<HotkeyRow keys={['⌘', '⌥', '⇧', '→']} label="Bottom-right" />
+								<HotkeyRow keys={['⌘', 'OPT', 'X']} label="Quit" />
+							</div>
 						</div>
-					</div>
-				)}
+					)}
+				</div>
 			</div>
 		</div>
 	);
