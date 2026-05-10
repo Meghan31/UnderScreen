@@ -54,7 +54,7 @@ body,
 	max-width: 380px;
 	height: auto;
 	border-radius: 12px;
-	padding: 14px 16px;
+	padding: 12px 14px;
 	pointer-events: auto;
 
 	/* Almost invisible — barely there when no answer */
@@ -64,6 +64,18 @@ body,
 	border: 1px solid rgba(255, 255, 255, 0.03);
 
 	animation: slideIn 0.2s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Compact idle layout: reduce vertical gaps */
+.panel--idle {
+	padding: 8px 10px;
+	min-width: 190px;
+}
+
+.idle-stack {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
 }
 
 /* When showing an answer: readable dark bg, fixed width for legibility */
@@ -95,7 +107,7 @@ body,
 .divider {
 	height: 1px;
 	background: rgba(255, 255, 255, 0.05);
-	margin: 10px 0;
+	margin: 6px 0;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -106,7 +118,7 @@ body,
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
-	margin-bottom: 12px;
+	margin-bottom: 6px;
 }
 
 .panel-logo {
@@ -144,7 +156,7 @@ body,
    ─────────────────────────────────────────────────────────────────────────────*/
 
 .status-row {
-	min-height: 18px;
+	min-height: 14px;
 	display: flex;
 	align-items: center;
 }
@@ -247,7 +259,7 @@ body,
 
 	scrollbar-width: none;
 	-ms-overflow-style: none;
-`cd ap	}
+}
 
 .answer-text::-webkit-scrollbar {
 	display: none;
@@ -290,7 +302,7 @@ body,
 .hotkeys {
 	display: flex;
 	flex-direction: column;
-	gap: 6px;
+	gap: 4px;
 }
 
 .hotkey-row {

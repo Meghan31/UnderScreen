@@ -593,7 +593,7 @@ fn main() {
                     .expect("failed to register global shortcut Cmd+Shift+S");
             }
 
-            // ── Global hotkey: Cmd+Shift+Q — quit ────────────────────────
+            // ── Global hotkeys: quit ────────────────────────────────────
             {
                 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
@@ -605,6 +605,15 @@ fn main() {
                         }
                     })
                     .expect("failed to register global shortcut Cmd+Shift+Q");
+
+                app.handle()
+                    .global_shortcut()
+                    .on_shortcut("CmdOrCtrl+Alt+X", move |handle, _shortcut, event| {
+                        if event.state() == ShortcutState::Pressed {
+                            handle.exit(0);
+                        }
+                    })
+                    .expect("failed to register global shortcut Cmd+Option+X");
             }
 
             // ── Boot state: visible and interactive ────────────────────────

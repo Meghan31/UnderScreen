@@ -21,7 +21,7 @@ function StatusLine({
 }) {
 	switch (status) {
 		case 'idle':
-			return <span className="status-idle">Press ⌘ ⇧ S to capture screen</span>;
+			return;
 		case 'scanning':
 			return (
 				<div className="status-active">
@@ -142,7 +142,7 @@ export default function App() {
 	return (
 		// overlay-root: full-window transparent pass-through canvas
 		<div className="overlay-root">
-			<div className={`panel ${hasAnswer ? 'panel--answer' : ''}`}>
+			<div className={`panel ${hasAnswer ? 'panel--answer' : 'panel--idle'}`}>
 				{hasAnswer ? (
 					<pre
 						key={answerKey}
@@ -155,32 +155,19 @@ export default function App() {
 						{isStreaming && <span className="stream-cursor">▊</span>}
 					</pre>
 				) : (
-					<>
-						{/* ── Header ──────────────────────────────────────────────────── */}
-						<div className="panel-header">
-							<div className="panel-logo">
-								{/* <span className="logo-icon">◈</span> */}
-								{/* <span className="logo-text">UnderScreen</span> */}
-							</div>
-							{/* <div className="panel-badge">STEALTH</div> */}
-						</div>
-
-						<div className="divider" />
-
+					<div className="idle-stack">
 						{/* ── Pipeline status ──────────────────────────────────────────── */}
 						<div className="status-row">
 							<StatusLine status={status} errorMsg={errorMsg} />
 						</div>
 
-						<div className="divider" />
-
 						{/* ── Hotkey reference strip ───────────────────────────────────── */}
 						<div className="hotkeys">
 							<HotkeyRow keys={['⌘', '⇧', 'Space']} label="Hide / Show" />
 							<HotkeyRow keys={['⌘', '⇧', 'S']} label="Capture + Answer" />
-							<HotkeyRow keys={['⌘', 'OPT', 'X']} label="Quit" dimmed />
+							<HotkeyRow keys={['⌘', 'OPT', 'X']} label="Quit" />
 						</div>
-					</>
+					</div>
 				)}
 			</div>
 		</div>
