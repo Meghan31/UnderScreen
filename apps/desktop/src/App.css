@@ -20,7 +20,8 @@ body,
 	width: 100%;
 	height: 100%;
 	background: transparent;
-	background-color: black; /* claude dont change this this is for debug purposes */
+	/* background-color: black;  */
+	/* claude dont change this this is for debug purposes */
 	overflow: hidden;
 	-webkit-font-smoothing: antialiased;
 	font-family: -apple-system, 'SF Pro Display', 'Helvetica Neue', sans-serif;
@@ -78,8 +79,11 @@ body,
 
 /* ─────────────────────────────────────────────────────────────────────────────
    Drag header — black bar at the top of the panel (~1 cm / 38 px tall).
-   data-tauri-drag-region on the element lets the user drag the whole window.
-   The close button sits outside the drag region so it stays clickable.
+   Drag is wired up in React via onMouseDown → getCurrentWindow().startDragging()
+   (see DragHeader in App.tsx). The cursor must stay as a regular arrow at all
+   times — no grab / grabbing / move cursors anywhere on the header.
+   The close button sits inside but bails out of the mousedown handler so
+   clicks still register normally.
    ─────────────────────────────────────────────────────────────────────────────*/
 
 .drag-header {
@@ -91,12 +95,12 @@ body,
 	background: #000;
 	/* No border-radius needed — panel overflow:hidden clips the top corners */
 	padding: 0 6px 0 12px;
-	-webkit-app-region: drag;
-	cursor: grab;
+	/* Keep the cursor as a plain arrow during hover AND drag — user request. */
+	cursor: default;
 }
 
 .drag-header:active {
-	cursor: grabbing;
+	cursor: default;
 }
 
 .drag-title {
@@ -105,7 +109,9 @@ body,
 	letter-spacing: 0.06em;
 	color: rgba(255, 255, 255, 0.45);
 	text-transform: lowercase;
-	pointer-events: none; /* let drag-region underneath handle events */
+	/* Let mousedown bubble up to the header so the drag handler fires. */
+	pointer-events: none;
+	cursor: default;
 }
 
 .close-btn {

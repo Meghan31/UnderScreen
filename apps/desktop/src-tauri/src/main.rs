@@ -379,7 +379,7 @@ fn apply_overlay_window_settings(ns_window: *mut objc::runtime::Object) {
 /// or shrinks, so the bottom edge stays pinned and the panel grows UPWARD as
 /// the answer streams in.
 fn position_window(window: &tauri::WebviewWindow, pos: &str) {
-    let panel_width: f64  = 210.0; // ≈ 5 cm — matches CSS + resize_window
+    let panel_width: f64  = 330.0; // keep in sync with PANEL_W in resize_window
     let margin:      f64  = 12.0;
     let margin_top:  f64  = 28.0; // clear the macOS menu bar
 
@@ -455,7 +455,7 @@ async fn resize_window(
     state: tauri::State<'_, SnapState>,
 ) -> Result<(), String> {
     // 210 logical px ≈ 5 cm at 96 dpi — matches the fixed panel width in CSS.
-    const PANEL_W: f64 = 210.0;
+    const PANEL_W: f64 = 330.0;
     const MARGIN:  f64 = 12.0;
     // Clamp: never smaller than 150 px, never taller than 390 px (~10 cm).
     let h = height.max(150.0).min(390.0);
@@ -560,7 +560,7 @@ fn main() {
             // Window starts compact (≈ 5 cm × 5 cm).  React's ResizeObserver
             // will call resize_window() to grow/shrink the height dynamically.
             {
-                const PANEL_W: f64    = 210.0; // ≈ 5 cm
+                const PANEL_W: f64    = 330.0; // keep in sync with resize_window
                 const PANEL_H: f64    = 185.0; // compact idle height
                 const MARGIN:  f64    = 12.0;
                 const MENU_BAR: f64   = 28.0;

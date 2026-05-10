@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useEffect, useRef, useState } from 'react';
 import './App.css';
 
@@ -14,13 +15,39 @@ type PipelineStatus = 'idle' | 'scanning' | 'thinking' | 'done' | 'error';
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Black 38px header — drag anywhere on it to move the window,
- *  click ✕ to fully quit the app. */
+ *  click ✕ to fully quit the app.
+ *
+ *  Drag is driven by an explicit `onMouseDown` → `startDragging()` call
+ *  (NOT `data-tauri-drag-region`).  Reasons:
+ *    • `data-tauri-drag-region` can be flaky on NSPanel windows that have
+ *      the NonactivatingPanel style mask + an elevated window level — the
+ *      built-in handler sometimes no-ops because the panel never becomes
+ *      the key window.
+ *    • Calling `getCurrentWindow().startDragging()` from a real DOM event
+ *      bypasses that quirk and always hands the drag off to AppKit's
+ *      `performWindowDragWithEvent:`, which works on NSPanel.
+ *    • Using a JS handler lets us call `e.preventDefault()` so the browser
+ *      never tries to apply any of its own cursor / selection behaviour,
+ *      which keeps the cursor as a plain arrow throughout the drag.
+ */
 function DragHeader() {
+	const handleHeaderMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+		// Only react to the primary (left) mouse button.
+		if (e.button !== 0) return;
+		// Don't start a drag if the click landed on the close button.
+		if ((e.target as HTMLElement).closest('.close-btn')) return;
+		// Suppress default behaviour (text selection, focus shifts, cursor change).
+		e.preventDefault();
+		// Hand the drag over to AppKit. The promise can be safely ignored;
+		// any error just means the window manager refused the drag this frame.
+		getCurrentWindow().startDragging().catch(() => {
+			/* swallow — non-fatal */
+		});
+	};
+
 	return (
-		<div className="drag-header" data-tauri-drag-region>
-			<span className="drag-title" data-tauri-drag-region>
-				underscreen
-			</span>
+		<div className="drag-header" onMouseDown={handleHeaderMouseDown}>
+			<span className="drag-title">underscreen</span>
 			<button
 				className="close-btn"
 				title="Quit"
