@@ -428,13 +428,12 @@ fn main() {
                                     ptr as *mut objc::runtime::Object,
                                 );
                             }
-                            // Re-assert click-through immediately after focus.
-                            // macOS can reset ignoresCursorEvents during activation.
-                            let _ = win_clone.set_ignore_cursor_events(true);
+                            // Keep the visible overlay interactive after focus.
+                            let _ = win_clone.set_ignore_cursor_events(false);
                         }
                         // Re-assert on move/resize (catches show() side-effects).
                         tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_) => {
-                            let _ = win_clone.set_ignore_cursor_events(true);
+                            let _ = win_clone.set_ignore_cursor_events(false);
                         }
                         _ => {}
                     }
@@ -466,10 +465,9 @@ fn main() {
             // ── Global hotkey: Cmd+Shift+Space ────────────────────────────
             //
             //   VISIBLE → press → HIDDEN    (overlay disappears entirely)
-            //   HIDDEN  → press → VISIBLE   (overlay reappears, click-through)
+            //   HIDDEN  → press → VISIBLE   (overlay reappears, interactive)
             //
-            //   The overlay is NEVER interactive via mouse in either state.
-            //   set_ignore_cursor_events(true) is always set after show().
+            //   The visible overlay should accept pointer input.
             {
                 use tauri::Emitter;
                 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
@@ -486,8 +484,7 @@ fn main() {
 
                             if was_visible {
                                 // VISIBLE → HIDDEN
-                                // Always restore click-through before hiding so there is
-                                // never a frame where the hidden window could steal input.
+                                // Restore click-through before hiding.
                                 let _ = toggle_window.set_ignore_cursor_events(true);
                                 let _ = toggle_window.hide();
                                 // Notify React so its mode state stays in sync.
@@ -497,11 +494,9 @@ fn main() {
                                 );
                             } else {
                                 // HIDDEN → VISIBLE
-                                // show() first so the window exists on-screen, then
-                                // IMMEDIATELY lock click-through before any mouse event
-                                // can land on the freshly-shown window.
+                                // Show the window and keep it interactive.
                                 let _ = toggle_window.show();
-                                let _ = toggle_window.set_ignore_cursor_events(true);
+                                let _ = toggle_window.set_ignore_cursor_events(false);
 
                                 // Re-apply NSPanel settings — macOS may have reset them
                                 // while the window was hidden or during the Space transition.
@@ -612,10 +607,8 @@ fn main() {
                     .expect("failed to register global shortcut Cmd+Shift+Q");
             }
 
-            // ── Boot state: visible, permanently click-through ────────────
-            // Every pointer event falls through to whatever app is behind the
-            // overlay. This is an unconditional invariant — it is never lifted.
-            let _ = window.set_ignore_cursor_events(true);
+            // ── Boot state: visible and interactive ────────────────────────
+            let _ = window.set_ignore_cursor_events(false);
 
             Ok(())
         })

@@ -9,8 +9,6 @@
 	box-sizing: border-box;
 	margin: 0;
 	padding: 0;
-	/* Total pass-through — nothing in the overlay is clickable */
-	pointer-events: none;
 	user-select: none;
 	-webkit-user-select: none;
 	cursor: default;
@@ -40,6 +38,7 @@ body,
 	justify-content: flex-end;
 	padding: 20px;
 	background: transparent;
+	pointer-events: auto;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -56,6 +55,7 @@ body,
 	height: auto;
 	border-radius: 12px;
 	padding: 14px 16px;
+	pointer-events: auto;
 
 	/* Almost invisible — barely there when no answer */
 	background: rgba(8, 8, 12, 0.08);
@@ -151,7 +151,7 @@ body,
 
 .status-idle {
 	font-size: 11px;
-	color: rgba(255, 255, 255, 0.20);
+	color: rgba(255, 255, 255, 0.2);
 	letter-spacing: 0.01em;
 }
 
@@ -235,17 +235,33 @@ body,
 	height: auto;
 	max-height: 700px;
 	overflow-y: auto;
+	pointer-events: auto;
+	cursor: default;
+	/* Allow pointer interaction inside the answer box so wheel/trackpad scrolling works */
 
 	padding: 10px 12px;
 	background: rgba(255, 255, 255, 0.018);
 	border: 1px solid rgba(255, 255, 255, 0.06);
 	border-radius: 8px;
+	overscroll-behavior: contain;
 
 	scrollbar-width: none;
-}
+	-ms-overflow-style: none;
+`cd ap	}
 
 .answer-text::-webkit-scrollbar {
 	display: none;
+}
+
+.answer-text::-webkit-scrollbar-track {
+	background: transparent;
+}
+
+.answer-text::-webkit-scrollbar-thumb {
+	background: rgba(255, 255, 255, 0.22);
+	border-radius: 999px;
+	border: 2px solid transparent;
+	background-clip: content-box;
 }
 
 /* Blinking cursor shown while LLM is streaming */
@@ -253,7 +269,8 @@ body,
 	display: inline-block;
 	color: #818cf8;
 	animation: cursorBlink 0.9s step-end infinite;
-	margin-left: 1px;
+	/* Allow interaction (scroll, wheel, drag-handle) within the panel */
+	pointer-events: auto;
 }
 
 @keyframes cursorBlink {
@@ -283,7 +300,7 @@ body,
 }
 
 .hotkey-row--dimmed {
-	opacity: 0.30;
+	opacity: 0.3;
 }
 
 .key-group {
@@ -301,7 +318,7 @@ body,
 	font-weight: 500;
 	color: rgba(255, 255, 255, 0.65);
 	background: rgba(255, 255, 255, 0.06);
-	border: 1px solid rgba(255, 255, 255, 0.10);
+	border: 1px solid rgba(255, 255, 255, 0.1);
 	border-radius: 4px;
 	padding: 2px 5px;
 	min-width: 20px;
@@ -311,5 +328,5 @@ body,
 
 .hotkey-label {
 	font-size: 11px;
-	color: rgba(255, 255, 255, 0.40);
+	color: rgba(255, 255, 255, 0.4);
 }

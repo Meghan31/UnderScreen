@@ -85,6 +85,8 @@ function HotkeyRow({
 export default function App() {
 	const [status, setStatus] = useState<PipelineStatus>('idle');
 	const [answer, setAnswer] = useState('');
+	// key used to force-remount the <pre> when a new capture starts
+	const [answerKey, setAnswerKey] = useState(0);
 	const [errorMsg, setErrorMsg] = useState('');
 	const answerRef = useRef<HTMLPreElement>(null);
 
@@ -103,6 +105,8 @@ export default function App() {
 				setStatus('scanning');
 				setAnswer('');
 				setErrorMsg('');
+				// bump key to remount the answer box so no visual remnants remain
+				setAnswerKey((k) => k + 1);
 			}),
 
 			// OCR done, LLM stream is starting: switch to thinking state.
@@ -141,6 +145,7 @@ export default function App() {
 			<div className={`panel ${hasAnswer ? 'panel--answer' : ''}`}>
 				{hasAnswer ? (
 					<pre
+						key={answerKey}
 						ref={answerRef}
 						className="answer-text"
 						/* scrollTop driven programmatically via ref when answer
@@ -173,7 +178,7 @@ export default function App() {
 						<div className="hotkeys">
 							<HotkeyRow keys={['⌘', '⇧', 'Space']} label="Hide / Show" />
 							<HotkeyRow keys={['⌘', '⇧', 'S']} label="Capture + Answer" />
-							<HotkeyRow keys={['⌘', '⇧', 'X']} label="Quit" dimmed />
+							<HotkeyRow keys={['⌘', 'OPT', 'X']} label="Quit" dimmed />
 						</div>
 					</>
 				)}
