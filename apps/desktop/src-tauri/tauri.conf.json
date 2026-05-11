@@ -15,9 +15,9 @@
 			{
 				"label": "main",
 				"title": "underscreen",
-				"width": 440,
+				"width": 940,
 				"height": 760,
-				"resizable": true,
+				"resizable": false,
 				"fullscreen": false,
 				"transparent": true,
 				"decorations": false,
@@ -26,7 +26,7 @@
 				"skipTaskbar": true,
 				"focus": false,
 				"visible": true,
-				"contentProtected": false
+				"contentProtected": true
 			}
 		],
 		"security": {
@@ -44,7 +44,8 @@
 			"icons/icon.ico"
 		],
 		"macOS": {
-			"minimumSystemVersion": "12.3"
+			"minimumSystemVersion": "12.3",
+			"infoPlist": "extra-info.plist"
 		}
 	}
 }

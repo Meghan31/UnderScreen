@@ -280,9 +280,23 @@
 // Suppress cfg warnings that originate inside the `objc` crate's macros
 #![allow(unexpected_cfgs)]
 
+mod gemini_llm;
+mod screenshot;
+
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tauri::Manager;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared state: which snap position the panel is currently anchored to.
+//
+// "top-*"    → panel grows DOWN as the answer streams in (top edge is anchored)
+// "bottom-*" → panel grows UP   as the answer streams in (bottom edge is anchored)
+//
+// We need to remember this between hotkey presses so resize_window() can keep
+// the correct edge pinned when the panel grows or shrinks.
+// ─────────────────────────────────────────────────────────────────────────────
+struct SnapState(Mutex<String>);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // macOS NSWindow → NSPanel overlay configuration
@@ -348,6 +362,55 @@ fn apply_overlay_window_settings(ns_window: *mut objc::runtime::Object) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Window positioning helper
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Snap the window to one of six named positions on the primary monitor.
+///
+/// Positions: "top-left" | "top-right" | "top-middle"
+///            "bottom-left" | "bottom-right" | "bottom-middle"
+///
+/// For bottom-* positions we use the panel's CURRENT inner height (not the
+/// max-allowed 390 px) so the bottom edge actually sits on the screen edge —
+/// otherwise a compact 185-px panel snapped to "bottom-right" lands hundreds
+/// of pixels above the bottom (i.e. roughly the middle of the screen).
+///
+/// resize_window() re-runs this same anchoring math whenever the panel grows
+/// or shrinks, so the bottom edge stays pinned and the panel grows UPWARD as
+/// the answer streams in.
+fn position_window(window: &tauri::WebviewWindow, pos: &str) {
+    let panel_width: f64  = 330.0; // keep in sync with PANEL_W in resize_window
+    let margin:      f64  = 12.0;
+    let margin_top:  f64  = 28.0; // clear the macOS menu bar
+
+    let Ok(Some(monitor)) = window.primary_monitor() else { return };
+    let size  = monitor.size();
+    let scale = monitor.scale_factor();
+    let logical_w = size.width  as f64 / scale;
+    let logical_h = size.height as f64 / scale;
+
+    // Use the actual current panel height for bottom anchoring.
+    // Fall back to 185 (compact idle height) if inner_size is unavailable.
+    let actual_h = window
+        .inner_size()
+        .ok()
+        .map(|s| s.height as f64 / scale)
+        .unwrap_or(185.0);
+
+    let (x, y): (f64, f64) = match pos {
+        "top-left"      => (margin,                                  margin_top),
+        "top-right"     => (logical_w - panel_width - margin,        margin_top),
+        "top-middle"    => ((logical_w - panel_width) / 2.0,         margin_top),
+        "bottom-left"   => (margin,                                  logical_h - actual_h - margin),
+        "bottom-right"  => (logical_w - panel_width - margin,        logical_h - actual_h - margin),
+        "bottom-middle" => ((logical_w - panel_width) / 2.0,         logical_h - actual_h - margin),
+        _ => return,
+    };
+
+    let _ = window.set_position(tauri::LogicalPosition::new(x, y));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // IPC Commands
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -370,6 +433,60 @@ fn get_app_status() -> serde_json::Value {
     })
 }
 
+/// Quit the app — called from the React close button in the drag header.
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
+/// Resize the window height to match the panel content.
+/// Called from React's ResizeObserver whenever the panel grows or shrinks.
+/// Width is fixed; only height changes.
+///
+/// If the panel is currently snapped to a "bottom-*" position, we ALSO
+/// reposition it so the bottom edge stays pinned to its anchor — this is what
+/// makes the panel grow UPWARD as the answer streams in instead of growing
+/// downward off the bottom of the screen. For "top-*" positions we leave the
+/// y coordinate alone, so the panel naturally grows downward.
+#[tauri::command]
+async fn resize_window(
+    height: f64,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, SnapState>,
+) -> Result<(), String> {
+    // 210 logical px ≈ 5 cm at 96 dpi — matches the fixed panel width in CSS.
+    const PANEL_W: f64 = 330.0;
+    const MARGIN:  f64 = 12.0;
+    // Clamp: never smaller than 150 px, never taller than 390 px (~10 cm).
+    let h = height.max(150.0).min(390.0);
+
+    window
+        .set_size(tauri::LogicalSize::new(PANEL_W, h))
+        .map_err(|e| e.to_string())?;
+
+    // Re-anchor the bottom edge if we're snapped to a bottom-* position.
+    let pos = state.0.lock().map(|p| p.clone()).unwrap_or_default();
+    if pos.starts_with("bottom-") {
+        if let Ok(Some(monitor)) = window.primary_monitor() {
+            let size  = monitor.size();
+            let scale = monitor.scale_factor();
+            let logical_w = size.width  as f64 / scale;
+            let logical_h = size.height as f64 / scale;
+
+            let new_y = logical_h - h - MARGIN;
+            let new_x = match pos.as_str() {
+                "bottom-left"   => MARGIN,
+                "bottom-right"  => logical_w - PANEL_W - MARGIN,
+                "bottom-middle" => (logical_w - PANEL_W) / 2.0,
+                _ => return Ok(()),
+            };
+            let _ = window.set_position(tauri::LogicalPosition::new(new_x, new_y));
+        }
+    }
+
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Entry point
 // ─────────────────────────────────────────────────────────────────────────────
@@ -385,7 +502,11 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![greet, get_app_status])
+        // Initial snap position must match the startup placement below
+        // (top-right corner). resize_window() reads this to decide whether to
+        // re-anchor the bottom edge when the panel grows.
+        .manage(SnapState(Mutex::new("top-right".to_string())))
+        .invoke_handler(tauri::generate_handler![greet, get_app_status, quit_app, resize_window])
         .setup(move |app| {
             let window = app
                 .get_webview_window("main")
@@ -423,37 +544,36 @@ fn main() {
                                     ptr as *mut objc::runtime::Object,
                                 );
                             }
-                            // Re-assert click-through immediately after focus.
-                            // macOS can reset ignoresCursorEvents during activation.
-                            let _ = win_clone.set_ignore_cursor_events(true);
+                            // Keep the visible overlay interactive after focus.
+                            let _ = win_clone.set_ignore_cursor_events(false);
                         }
                         // Re-assert on move/resize (catches show() side-effects).
                         tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_) => {
-                            let _ = win_clone.set_ignore_cursor_events(true);
+                            let _ = win_clone.set_ignore_cursor_events(false);
                         }
                         _ => {}
                     }
                 });
             }
 
-            // ── Position: right side of primary monitor ───────────────────
+            // ── Initial position + size ───────────────────────────────────
+            // Window starts compact (≈ 5 cm × 5 cm).  React's ResizeObserver
+            // will call resize_window() to grow/shrink the height dynamically.
             {
-                let panel_width  = 440.0_f64;
-                let margin_right = 20.0_f64;
-                let margin_top   = 28.0_f64; // clear the macOS menu bar
+                const PANEL_W: f64    = 330.0; // keep in sync with resize_window
+                const PANEL_H: f64    = 185.0; // compact idle height
+                const MARGIN:  f64    = 12.0;
+                const MENU_BAR: f64   = 28.0;
 
                 if let Ok(Some(monitor)) = window.primary_monitor() {
                     let size  = monitor.size();
                     let scale = monitor.scale_factor();
+                    let logical_w = size.width as f64 / scale;
 
-                    let logical_w = size.width  as f64 / scale;
-                    let logical_h = size.height as f64 / scale;
+                    let x = (logical_w - PANEL_W - MARGIN).max(0.0);
+                    let y = MENU_BAR;
 
-                    let x = (logical_w - panel_width - margin_right).max(0.0);
-                    let y = margin_top;
-                    let panel_height = 760.0_f64.min(logical_h - margin_top - 20.0);
-
-                    let _ = window.set_size(tauri::LogicalSize::new(panel_width, panel_height));
+                    let _ = window.set_size(tauri::LogicalSize::new(PANEL_W, PANEL_H));
                     let _ = window.set_position(tauri::LogicalPosition::new(x, y));
                 }
             }
@@ -461,11 +581,11 @@ fn main() {
             // ── Global hotkey: Cmd+Shift+Space ────────────────────────────
             //
             //   VISIBLE → press → HIDDEN    (overlay disappears entirely)
-            //   HIDDEN  → press → VISIBLE   (overlay reappears, click-through)
+            //   HIDDEN  → press → VISIBLE   (overlay reappears, interactive)
             //
-            //   The overlay is NEVER interactive via mouse in either state.
-            //   set_ignore_cursor_events(true) is always set after show().
+            //   The visible overlay should accept pointer input.
             {
+                use tauri::Emitter;
                 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
                 let toggle_window = window.clone();
@@ -480,15 +600,19 @@ fn main() {
 
                             if was_visible {
                                 // VISIBLE → HIDDEN
+                                // Restore click-through before hiding.
                                 let _ = toggle_window.set_ignore_cursor_events(true);
                                 let _ = toggle_window.hide();
+                                // Notify React so its mode state stays in sync.
+                                let _ = toggle_window.emit(
+                                    "overlay-toggle",
+                                    serde_json::json!({ "visible": false }),
+                                );
                             } else {
                                 // HIDDEN → VISIBLE
-                                // show() first so the window exists on-screen, then
-                                // IMMEDIATELY lock click-through before any mouse event
-                                // can land on the freshly-shown window.
+                                // Show the window and keep it interactive.
                                 let _ = toggle_window.show();
-                                let _ = toggle_window.set_ignore_cursor_events(true);
+                                let _ = toggle_window.set_ignore_cursor_events(false);
 
                                 // Re-apply NSPanel settings — macOS may have reset them
                                 // while the window was hidden or during the Space transition.
@@ -498,16 +622,163 @@ fn main() {
                                         ptr as *mut objc::runtime::Object,
                                     );
                                 }
+
+                                // Notify React so its mode state stays in sync.
+                                let _ = toggle_window.emit(
+                                    "overlay-toggle",
+                                    serde_json::json!({ "visible": true }),
+                                );
                             }
                         }
                     })
                     .expect("failed to register global shortcut Cmd+Shift+Space");
             }
 
-            // ── Boot state: visible, permanently click-through ────────────
-            // Every pointer event falls through to whatever app is behind the
-            // overlay. This is an unconditional invariant — it is never lifted.
-            let _ = window.set_ignore_cursor_events(true);
+            // ── Global hotkey: Cmd+Shift+S — full pipeline ───────────────
+            //
+            // Flow (fully async, no UI interaction required):
+            //   1. Show overlay if hidden (so the user can see progress).
+            //   2. Emit "capture-start"  → React: status = scanning
+            //   3. [blocking] Screenshot + Apple Vision OCR
+            //   4. Emit "llm-start"      → React: status = thinking, clear answer
+            //   5. Stream OpenAI response as "llm-token" events → React: appends tokens
+            //   6. Emit "llm-done"       → React: status = done
+            //      OR "pipeline-error"  → React: status = error
+            //
+            // contentProtected = true means our window is excluded from the
+            // ScreenCaptureKit frame — the screenshot captures only the user's
+            // content behind the overlay.
+            {
+                use tauri::Emitter;
+                use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+
+                let pipeline_window  = window.clone();
+                let pipeline_visible = overlay_visible.clone();
+
+                app.handle()
+                    .global_shortcut()
+                    .on_shortcut("CmdOrCtrl+Shift+S", move |_app, _shortcut, event| {
+                        if event.state() != ShortcutState::Pressed {
+                            return;
+                        }
+
+                        // Always show the overlay so the user can see progress.
+                        if !pipeline_visible.load(Ordering::SeqCst) {
+                            let _ = pipeline_window.show();
+                            let _ = pipeline_window.set_ignore_cursor_events(true);
+                            pipeline_visible.store(true, Ordering::SeqCst);
+
+                            #[cfg(target_os = "macos")]
+                            if let Ok(ptr) = pipeline_window.ns_window() {
+                                apply_overlay_window_settings(
+                                    ptr as *mut objc::runtime::Object,
+                                );
+                            }
+                        }
+
+                        // Notify React: pipeline starting.
+                        let _ = pipeline_window.emit("capture-start", ());
+
+                        // Spawn the full async pipeline on Tauri's runtime.
+                        let win = pipeline_window.clone();
+                        tauri::async_runtime::spawn(async move {
+                            // ── Step 1: Screenshot + OCR (blocking) ──────────
+                            let ocr = match tokio::task::spawn_blocking(
+                                screenshot::capture_and_ocr,
+                            )
+                            .await
+                            {
+                                Ok(Ok(r))  => r,
+                                Ok(Err(e)) => {
+                                    let _ = win.emit("pipeline-error", &e);
+                                    return;
+                                }
+                                Err(e) => {
+                                    let _ = win.emit("pipeline-error", &e.to_string());
+                                    return;
+                                }
+                            };
+
+                            // ── Step 2: LLM streaming ─────────────────────────
+                            match gemini_llm::query_streaming(&ocr.ocr_text, &win).await {
+                                Ok(_)  => { let _ = win.emit("llm-done", ()); }
+                                Err(e) => { let _ = win.emit("pipeline-error", &e); }
+                            }
+                        });
+                    })
+                    .expect("failed to register global shortcut Cmd+Shift+S");
+            }
+
+            // ── Global hotkeys: snap window to 6 positions ───────────────
+            //
+            // Cmd+Ctrl+Option+Left        → top-left
+            // Cmd+Ctrl+Option+Right       → top-right
+            // Cmd+Ctrl+Option+Up          → top-middle
+            // Cmd+Ctrl+Option+Down        → bottom-middle
+            // Cmd+Ctrl+Option+Shift+Left  → bottom-left
+            // Cmd+Ctrl+Option+Shift+Right → bottom-right
+            //
+            // Note: "two arrow keys simultaneously" (e.g. Left+Down) is not
+            // supported by any OS-level hotkey API, so Shift differentiates the
+            // bottom-corner positions from the top-corner ones.
+            {
+                use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+
+                let snap_pairs: &[(&str, &str)] = &[
+                    ("CmdOrCtrl+Alt+ArrowLeft",        "top-left"),
+                    ("CmdOrCtrl+Alt+ArrowRight",       "top-right"),
+                    ("CmdOrCtrl+Alt+ArrowUp",          "top-middle"),
+                    ("CmdOrCtrl+Alt+ArrowDown",        "bottom-middle"),
+                    ("CmdOrCtrl+Alt+Shift+ArrowLeft",  "bottom-left"),
+                    ("CmdOrCtrl+Alt+Shift+ArrowRight", "bottom-right"),
+                ];
+
+                for (hotkey, snap_pos) in snap_pairs {
+                    let snap_window = window.clone();
+                    let pos = snap_pos.to_string();
+
+                    app.handle()
+                        .global_shortcut()
+                        .on_shortcut(*hotkey, move |app_handle, _shortcut, event| {
+                            if event.state() == ShortcutState::Pressed {
+                                // Remember the new snap position so resize_window()
+                                // knows which edge to keep anchored when the
+                                // panel grows or shrinks.
+                                if let Ok(mut s) = app_handle.state::<SnapState>().0.lock() {
+                                    *s = pos.clone();
+                                }
+                                position_window(&snap_window, &pos);
+                            }
+                        })
+                        .unwrap_or_else(|e| eprintln!("Failed to register snap hotkey {hotkey}: {e}"));
+                }
+            }
+
+            // ── Global hotkeys: quit ────────────────────────────────────
+            {
+                use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+
+                app.handle()
+                    .global_shortcut()
+                    .on_shortcut("CmdOrCtrl+Shift+Q", move |handle, _shortcut, event| {
+                        if event.state() == ShortcutState::Pressed {
+                            handle.exit(0);
+                        }
+                    })
+                    .expect("failed to register global shortcut Cmd+Shift+Q");
+
+                app.handle()
+                    .global_shortcut()
+                    .on_shortcut("CmdOrCtrl+Alt+X", move |handle, _shortcut, event| {
+                        if event.state() == ShortcutState::Pressed {
+                            handle.exit(0);
+                        }
+                    })
+                    .expect("failed to register global shortcut Cmd+Option+X");
+            }
+
+            // ── Boot state: visible and interactive ────────────────────────
+            let _ = window.set_ignore_cursor_events(false);
 
             Ok(())
         })

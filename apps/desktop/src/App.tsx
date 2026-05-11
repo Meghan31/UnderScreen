@@ -1,159 +1,254 @@
-import { useState, useEffect, useCallback } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import "./App.css";
+import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import { useEffect, useRef, useState } from 'react';
+import './App.css';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
 
-interface AppStatus {
-  status: string;
-  version: string;
-  stealth: boolean;
-  services: {
-    overlay: boolean;
-    screenshot: boolean;
-    llm: boolean;
-  };
+type PipelineStatus = 'idle' | 'scanning' | 'thinking' | 'done' | 'error';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sub-components
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Black 38px header — drag anywhere on it to move the window,
+ *  click ✕ to fully quit the app.
+ *
+ *  Drag is driven by an explicit `onMouseDown` → `startDragging()` call
+ *  (NOT `data-tauri-drag-region`).  Reasons:
+ *    • `data-tauri-drag-region` can be flaky on NSPanel windows that have
+ *      the NonactivatingPanel style mask + an elevated window level — the
+ *      built-in handler sometimes no-ops because the panel never becomes
+ *      the key window.
+ *    • Calling `getCurrentWindow().startDragging()` from a real DOM event
+ *      bypasses that quirk and always hands the drag off to AppKit's
+ *      `performWindowDragWithEvent:`, which works on NSPanel.
+ *    • Using a JS handler lets us call `e.preventDefault()` so the browser
+ *      never tries to apply any of its own cursor / selection behaviour,
+ *      which keeps the cursor as a plain arrow throughout the drag.
+ */
+function DragHeader() {
+	const handleHeaderMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+		// Only react to the primary (left) mouse button.
+		if (e.button !== 0) return;
+		// Don't start a drag if the click landed on the close button.
+		if ((e.target as HTMLElement).closest('.close-btn')) return;
+		// Suppress default behaviour (text selection, focus shifts, cursor change).
+		e.preventDefault();
+		// Hand the drag over to AppKit. The promise can be safely ignored;
+		// any error just means the window manager refused the drag this frame.
+		getCurrentWindow().startDragging().catch(() => {
+			/* swallow — non-fatal */
+		});
+	};
+
+	return (
+		<div className="drag-header" onMouseDown={handleHeaderMouseDown}>
+			<span className="drag-title">underscreen</span>
+			<button
+				className="close-btn"
+				title="Quit"
+				onClick={() => invoke('quit_app')}
+			>
+				✕
+			</button>
+		</div>
+	);
 }
 
-type OverlayMode = "hidden" | "peek" | "interactive";
+function StatusLine({
+	status,
+	errorMsg,
+}: {
+	status: PipelineStatus;
+	errorMsg: string;
+}) {
+	switch (status) {
+		case 'idle':
+			return;
+		case 'scanning':
+			return (
+				<div className="status-active">
+					<span className="status-dot status-dot--scan" />
+					<span className="status-label">Scanning screen…</span>
+				</div>
+			);
+		case 'thinking':
+			return (
+				<div className="status-active">
+					<span className="status-dot status-dot--think" />
+					<span className="status-label">Generating answer…</span>
+				</div>
+			);
+		case 'done':
+			return (
+				<div className="status-active">
+					<span className="status-dot status-dot--done" />
+					<span className="status-label">
+						Done — press ⌘ ⇧ S to capture again
+					</span>
+				</div>
+			);
+		case 'error':
+			return (
+				<div className="status-active">
+					<span className="status-dot status-dot--err" />
+					<span className="status-label status-label--err">{errorMsg}</span>
+				</div>
+			);
+	}
+}
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Status dot
-// ─────────────────────────────────────────────────────────────────────────────
-
-function ServiceDot({ active, label }: { active: boolean; label: string }) {
-  return (
-    <div className="service-row">
-      <span className={`dot ${active ? "dot--on" : "dot--off"}`} />
-      <span className="service-label">{label}</span>
-    </div>
-  );
+function HotkeyRow({
+	keys,
+	label,
+	dimmed = false,
+}: {
+	keys: string[];
+	label: string;
+	dimmed?: boolean;
+}) {
+	return (
+		<div className={`hotkey-row ${dimmed ? 'hotkey-row--dimmed' : ''}`}>
+			<div className="key-group">
+				{keys.map((k, i) => (
+					<kbd key={i} className="key">
+						{k}
+					</kbd>
+				))}
+			</div>
+			<span className="hotkey-label">{label}</span>
+		</div>
+	);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Main overlay component
 // ─────────────────────────────────────────────────────────────────────────────
 
-function App() {
-  const [status, setStatus] = useState<AppStatus | null>(null);
-  const [mode, setMode] = useState<OverlayMode>("peek");
+export default function App() {
+	const [status, setStatus] = useState<PipelineStatus>('idle');
+	const [answer, setAnswer] = useState('');
+	// key used to force-remount the <pre> when a new capture starts
+	const [answerKey, setAnswerKey] = useState(0);
+	const [errorMsg, setErrorMsg] = useState('');
+	const answerRef = useRef<HTMLPreElement>(null);
+	const panelRef = useRef<HTMLDivElement>(null);
+	const lastHRef = useRef<number>(0);
 
-  // ── Fetch initial app status from Rust ──────────────────────────────────
-  useEffect(() => {
-    invoke<AppStatus>("get_app_status").then(setStatus).catch(console.error);
-  }, []);
+	// ── Auto-scroll answer to bottom as tokens stream in ───────────────────
+	useEffect(() => {
+		if (answerRef.current) {
+			answerRef.current.scrollTop = answerRef.current.scrollHeight;
+		}
+	}, [answer]);
 
-  // ── Listen for hotkey-driven visibility changes from the Rust backend ───
-  // When Cmd+Shift+Space is pressed the Rust layer hides/shows the window.
-  // This event lets the React state stay in sync.
-  useEffect(() => {
-    const unlisten = listen<{ visible: boolean }>("overlay-toggle", (event) => {
-      setMode(event.payload.visible ? "peek" : "hidden");
-    });
-    return () => {
-      unlisten.then((f) => f());
-    };
-  }, []);
+	// ── Resize the OS window to match the panel height ─────────────────────
+	// ResizeObserver fires whenever the panel grows (answer streaming in)
+	// or shrinks (answer cleared). We clamp: min 150 px, max 390 px (~10 cm).
+	// Only invoke when the height actually changes to avoid IPC spam.
+	useEffect(() => {
+		const el = panelRef.current;
+		if (!el) return;
 
-  // ── Enter interactive mode when the panel is clicked ────────────────────
-  // The window starts in click-through (ignoresMouseEvents = true).
-  // Pressing Cmd+Shift+Space switches it to interactive mode via Rust.
-  // This handler is for the frontend-side visual state only.
-  const enterInteractive = useCallback(() => {
-    setMode("interactive");
-  }, []);
+		const ro = new ResizeObserver(([entry]) => {
+			const h = Math.ceil(entry.contentRect.height);
+			const clamped = Math.max(150, Math.min(h, 390));
+			if (Math.abs(clamped - lastHRef.current) > 1) {
+				lastHRef.current = clamped;
+				invoke('resize_window', { height: clamped });
+			}
+		});
 
-  const exitInteractive = useCallback(async () => {
-    setMode("peek");
-    // Restore click-through
-    await invoke("set_overlay_visible", { visible: false }).catch(console.error);
-  }, []);
+		ro.observe(el);
+		return () => ro.disconnect();
+	}, []);
 
-  return (
-    <div className="overlay-root">
-      {/* ── Floating panel ─────────────────────────────────────────────── */}
-      <div
-        className={`panel ${mode === "interactive" ? "panel--interactive" : ""}`}
-        onClick={mode === "peek" ? enterInteractive : undefined}
-      >
-        {/* Header */}
-        <div className="panel-header">
-          <div className="panel-logo">
-            <span className="logo-icon">◈</span>
-            <span className="logo-text">UnderScreen</span>
-          </div>
-          <div className="panel-badge">STEALTH</div>
-        </div>
+	// ── Rust → React event bus ──────────────────────────────────────────────
+	useEffect(() => {
+		const subs = Promise.all([
+			// Pipeline begins: clear previous answer and show scanning state.
+			listen('capture-start', () => {
+				setStatus('scanning');
+				setAnswer('');
+				setErrorMsg('');
+				// bump key to remount the answer box so no visual remnants remain
+				setAnswerKey((k) => k + 1);
+			}),
 
-        {/* Divider */}
-        <div className="divider" />
+			// OCR done, LLM stream is starting: switch to thinking state.
+			listen('llm-start', () => {
+				setStatus('thinking');
+			}),
 
-        {/* Status block */}
-        {status && (
-          <div className="status-block">
-            <p className="status-section-label">SERVICES</p>
-            <ServiceDot active={status.services.overlay} label="Overlay" />
-            <ServiceDot active={status.services.screenshot} label="Screenshot" />
-            <ServiceDot active={status.services.llm} label="AI Engine" />
-          </div>
-        )}
+			// Individual token from the LLM stream.
+			listen<string>('llm-token', (e) => {
+				setAnswer((prev) => prev + e.payload);
+			}),
 
-        {/* Divider */}
-        <div className="divider" />
+			// Stream finished successfully.
+			listen('llm-done', () => {
+				setStatus('done');
+			}),
 
-        {/* Hotkey hints */}
-        <div className="hotkeys">
-          <p className="status-section-label">SHORTCUTS</p>
-          <HotkeyRow keys={["⌘", "⇧", "Space"]} label="Toggle overlay" />
-          <HotkeyRow keys={["⌘", "⇧", "S"]} label="Screenshot + AI" dimmed />
-          <HotkeyRow keys={["⌘", "⇧", "Q"]} label="Quit" dimmed />
-        </div>
+			// Any stage of the pipeline failed.
+			listen<string>('pipeline-error', (e) => {
+				setStatus('error');
+				setErrorMsg(e.payload);
+			}),
+		]);
 
-        {/* Divider */}
-        <div className="divider" />
+		return () => {
+			subs.then((fns) => fns.forEach((f) => f()));
+		};
+	}, []);
 
-        {/* Footer */}
-        <div className="panel-footer">
-          <span className="footer-text">
-            Invisible to Zoom · OBS · QuickTime
-          </span>
-          {mode === "interactive" && (
-            <button className="close-btn" onClick={exitInteractive}>
-              ✕ dismiss
-            </button>
-          )}
-        </div>
-      </div>
-    </div>
-  );
+	const hasAnswer = answer.length > 0;
+	const isStreaming = status === 'thinking';
+
+	return (
+		// overlay-root: full-window transparent pass-through canvas
+		<div className="overlay-root">
+			<div
+				ref={panelRef}
+				className={`panel ${hasAnswer ? 'panel--answer' : 'panel--idle'}`}
+			>
+				{/* ── Draggable black header — always visible ─────────────── */}
+				<DragHeader />
+
+				{/* ── Panel body ──────────────────────────────────────────── */}
+				<div className="panel-body">
+					{hasAnswer ? (
+						<pre key={answerKey} ref={answerRef} className="answer-text">
+							{answer}
+							{isStreaming && <span className="stream-cursor">▊</span>}
+						</pre>
+					) : (
+						<div className="idle-stack">
+							{/* ── Pipeline status ───────────────────────────── */}
+							<div className="status-row">
+								<StatusLine status={status} errorMsg={errorMsg} />
+							</div>
+
+							{/* ── Hotkey reference strip ────────────────────── */}
+							<div className="hotkeys">
+								<HotkeyRow keys={['⌘', '⇧', 'Space']} label="Hide / Show" />
+								<HotkeyRow keys={['⌘', '⇧', 'S']} label="Capture + Answer" />
+								<HotkeyRow keys={['⌘', '⌥', '←']} label="Top-left" />
+								<HotkeyRow keys={['⌘', '⌥', '→']} label="Top-right" />
+								<HotkeyRow keys={['⌘', '⌥', '↑']} label="Top-middle" />
+								<HotkeyRow keys={['⌘', '⌥', '↓']} label="Bottom-middle" />
+								<HotkeyRow keys={['⌘', '⌥', '⇧', '←']} label="Bottom-left" />
+								<HotkeyRow keys={['⌘', '⌥', '⇧', '→']} label="Bottom-right" />
+								<HotkeyRow keys={['⌘', 'OPT', 'X']} label="Quit" />
+							</div>
+						</div>
+					)}
+				</div>
+			</div>
+		</div>
+	);
 }
-
-// ── Hotkey badge row ─────────────────────────────────────────────────────────
-
-function HotkeyRow({
-  keys,
-  label,
-  dimmed = false,
-}: {
-  keys: string[];
-  label: string;
-  dimmed?: boolean;
-}) {
-  return (
-    <div className={`hotkey-row ${dimmed ? "hotkey-row--dimmed" : ""}`}>
-      <div className="key-group">
-        {keys.map((k, i) => (
-          <kbd key={i} className="key">
-            {k}
-          </kbd>
-        ))}
-      </div>
-      <span className="hotkey-label">{label}</span>
-    </div>
-  );
-}
-
-export default App;
